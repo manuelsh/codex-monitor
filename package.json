@@ -1,0 +1,43 @@
+{
+  "name": "codex-monitor",
+  "version": "0.1.0",
+  "description": "Simple local dashboard for monitoring Codex sessions.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n server,web -c cyan,yellow \"npm run dev:server\" \"npm run dev:web\"",
+    "dev:server": "tsx watch server/src/index.ts",
+    "dev:web": "vite --config web/vite.config.ts",
+    "build": "npm run build:server && npm run build:web",
+    "build:server": "tsup server/src/index.ts --sourcemap --format esm --platform node --out-dir dist/server",
+    "build:web": "vite build --config web/vite.config.ts",
+    "start": "node dist/server/index.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "react-router-dom": "^7.14.0",
+    "ws": "^8.20.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.5.2",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react-swc": "^3.11.0",
+    "concurrently": "^9.2.1",
+    "tsup": "^8.5.1",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2",
+    "vite": "^6.4.2",
+    "vitest": "^4.1.3"
+  }
+}

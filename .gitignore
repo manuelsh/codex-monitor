@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+coverage/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Local Codex/browser state
+.codex/
+.playwright-mcp/
+
+# Logs and runtime output
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Tool caches
+.vite/
+.vitest/
+.tsup/
+*.tsbuildinfo
+
+# Editor and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Temporary files
+tmp/
+temp/
+.cache/
