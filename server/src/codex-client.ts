@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, readdirSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
@@ -289,6 +289,7 @@ export function resolveCodexExecutable(options?: {
   env?: NodeJS.ProcessEnv;
   homeDir?: string;
   platform?: NodeJS.Platform;
+  applicationsDir?: string;
 }): string {
   const env = options?.env ?? process.env;
   const homeDir = options?.homeDir ?? os.homedir();
@@ -296,24 +297,45 @@ export function resolveCodexExecutable(options?: {
 
   for (const key of CODEX_OVERRIDE_ENV_KEYS) {
     const configured = env[key];
-    if (configured && existsSync(configured)) {
+    if (configured && isExecutable(configured, platform)) {
       return configured;
     }
   }
 
   for (const candidate of getPathCandidates(env, platform)) {
-    if (existsSync(candidate)) {
+    if (isExecutable(candidate, platform)) {
       return candidate;
     }
   }
 
+  if (platform === "darwin") {
+    for (const root of [path.join(homeDir, "Applications"), options?.applicationsDir ?? "/Applications"]) {
+      for (const app of ["Codex.app", "ChatGPT.app"]) {
+        const candidate = path.join(root, app, "Contents", "Resources", "codex");
+        if (isExecutable(candidate, platform)) {
+          return candidate;
+        }
+      }
+    }
+  }
+
   for (const candidate of getBundledCandidates(homeDir, platform)) {
-    if (existsSync(candidate)) {
+    if (isExecutable(candidate, platform)) {
       return candidate;
     }
   }
 
   return platform === "win32" ? "codex.exe" : "codex";
+}
+
+function isExecutable(candidate: string, platform: NodeJS.Platform): boolean {
+  try {
+    if (!statSync(candidate).isFile()) return false;
+    accessSync(candidate, platform === "win32" ? constants.F_OK : constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function getPathCandidates(
@@ -327,7 +349,7 @@ function getPathCandidates(
       : ["codex"];
 
   return rawPath
-    .split(path.delimiter)
+    .split(platform === "win32" ? ";" : ":")
     .map((entry) => entry.trim().replace(/^"(.*)"$/, "$1"))
     .filter(Boolean)
     .flatMap((entry) => binaryNames.map((binary) => path.join(entry, binary)));

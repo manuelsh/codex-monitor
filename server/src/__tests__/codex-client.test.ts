@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -65,5 +65,62 @@ describe("createCodexAppServerSpawnError", () => {
     expect(result.message).toBe(
       "Unable to start Codex app-server (codex app-server): spawn ENOENT"
     );
+  });
+});
+
+
+describe("macOS desktop executable discovery", () => {
+  let root: string;
+  beforeEach(() => { root = mkdtempSync(path.join(os.tmpdir(), "codex-desktop-")); });
+  afterEach(() => { rmSync(root, { recursive: true, force: true }); });
+
+  function binary(relative: string) {
+    const file = path.join(root, relative);
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, "#!/bin/sh\nexit 0\n");
+    chmodSync(file, 0o755);
+    return file;
+  }
+
+  function resolve(env: NodeJS.ProcessEnv = { PATH: "" }) {
+    return resolveCodexExecutable({
+      env, platform: "darwin", homeDir: path.join(root, "home"),
+      applicationsDir: path.join(root, "Applications")
+    });
+  }
+
+  it.each(["Codex.app", "ChatGPT.app"])("finds the binary bundled in %s", (app) => {
+    const file = binary(`Applications/${app}/Contents/Resources/codex`);
+    expect(resolve()).toBe(file);
+  });
+
+  it("finds a user-local desktop installation", () => {
+    const file = binary("home/Applications/Codex.app/Contents/Resources/codex");
+    expect(resolve()).toBe(file);
+  });
+
+  it("preserves explicit override and PATH precedence", () => {
+    binary("Applications/Codex.app/Contents/Resources/codex");
+    const inPath = binary("bin/codex");
+    const override = binary("custom/codex");
+    expect(resolveCodexExecutable({ env: { PATH: path.dirname(inPath) }, platform: process.platform, homeDir: root })).toBe(inPath);
+    expect(resolve({ PATH: path.dirname(inPath), CODEX_BIN: override })).toBe(override);
+    expect(resolve({ PATH: "", CODEX_MONITOR_CODEX_PATH: override })).toBe(override);
+  });
+
+  it("ignores directories named codex", () => {
+    mkdirSync(path.join(root, "bin/codex"), { recursive: true });
+    const file = binary("Applications/ChatGPT.app/Contents/Resources/codex");
+    expect(resolve({ PATH: path.join(root, "bin") })).toBe(file);
+  });
+
+  it("retains the VS Code fallback without desktop apps", () => {
+    const file = binary("home/.vscode/extensions/openai.chatgpt-test/bin/darwin-aarch64/codex");
+    expect(resolve()).toBe(file);
+  });
+
+  it("retains Windows PATH discovery", () => {
+    const file = binary("windows/codex.exe");
+    expect(resolveCodexExecutable({ env: { Path: path.dirname(file) }, platform: "win32", homeDir: root })).toBe(file);
   });
 });

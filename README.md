@@ -40,17 +40,17 @@ Codex Monitor is designed for local use only.
 
 ## Requirements
 
-- Node.js 20 or newer.
+- Node.js 22 or newer is recommended (the CI matrix uses Node.js 22).
 - npm.
 - A working Codex executable that supports `codex app-server`.
-- macOS/Linux launcher scripts use standard shell tools. `curl` is used for health checks when available, and `open` or `xdg-open` is used to open the dashboard.
+- macOS/Linux launcher scripts use standard shell tools. Node.js is used for health checks, and `open` or `xdg-open` is used to open the dashboard.
 
-Codex Monitor looks for Codex in `PATH`, then in the bundled VS Code ChatGPT extension location. You can override the executable path with `CODEX_MONITOR_CODEX_PATH` or `CODEX_BIN`.
+Codex Monitor respects executable overrides first, then looks for Codex in `PATH`. On macOS it also checks `~/Applications` and `/Applications` for the executable bundled in `Codex.app` or `ChatGPT.app`, before falling back to the VS Code ChatGPT extension location. You can override the executable path with `CODEX_MONITOR_CODEX_PATH` or `CODEX_BIN`.
 
 ## Install
 
 ```bash
-npm install
+npm ci
 ```
 
 ## Run In Development
@@ -75,7 +75,7 @@ After `npm start`, open `http://127.0.0.1:4201`.
 
 The launchers do not register a login/startup service. Codex Monitor starts only when you run one of these commands or shortcuts.
 
-The monitor launcher builds the app if `dist/server/index.js` is missing, starts the built server in the background, writes local logs next to the repo, and opens `http://127.0.0.1:4201`.
+The monitor launcher builds the app if the build is missing, starts the built server in the background, writes local logs next to the repo, and opens `http://127.0.0.1:4201`. On macOS/Linux it waits for a successful health check and exits with an error if the port is occupied by another service or startup fails. After pulling changes, run `npm ci` and `npm run build` to refresh an existing build.
 
 ### Windows
 
@@ -97,6 +97,10 @@ You can also run the launchers directly:
 
 ### macOS And Linux
 
+On macOS, install Node.js first if it is missing, for example with `brew install node@22`, then run `npm ci` and `npm run build` in this repository. The launchers discover Node in standard Homebrew and official-installer locations even when launched from Finder with a minimal `PATH`. Other Node installations must be available in `PATH`.
+
+A Codex desktop installation that bundles `Contents/Resources/codex` is sufficient; a separate CLI install is not required. Keep the desktop app signed in so usage limits are available.
+
 Start only the monitor:
 
 ```bash
@@ -111,7 +115,7 @@ sh scripts/start-codex-with-monitor.sh
 sh scripts/start-codex-with-monitor.sh --cli
 ```
 
-The Codex launcher opens a discoverable Codex desktop app when possible. If no desktop app is found, it falls back to the `codex` CLI from `PATH`, `CODEX_BIN`, or `CODEX_MONITOR_CODEX_PATH`.
+The Codex launcher opens a discoverable Codex desktop app when possible (including ChatGPT on macOS when it bundles Codex). If no desktop app is found, it falls back to the `codex` CLI from `PATH`, `CODEX_BIN`, or `CODEX_MONITOR_CODEX_PATH`.
 
 Install a desktop launcher:
 
@@ -150,6 +154,16 @@ Shutdown automation is disabled by default. In development it runs in dry-run mo
 Real shutdown scheduling is implemented with Windows `shutdown.exe`. In production mode the Windows launcher sets `CODEX_MONITOR_DRY_RUN=0`, so the UI can schedule real Windows shutdown commands after the configured settle delay. macOS and Linux default to dry-run mode even in production, so the dashboard can show what would be scheduled without attempting a platform-specific shutdown command.
 
 Use the dashboard controls to cancel a pending shutdown.
+
+## Platform Verification
+
+The same source tree and lockfile are used on Windows, macOS, and Linux. GitHub Actions runs the test suite and production build on all three systems with Node.js 22; POSIX launcher checks run on macOS/Linux. Windows shutdown commands are covered with mocked command execution, never by shutting down a CI machine.
+
+For a local smoke test, start the monitor and check `/api/health`, then confirm the dashboard shows `Socket live`, your active work, previous work, and available usage limits. Usage requires an authenticated Codex installation. A successful HTTP health check alone does not establish that Codex is connected.
+
+The macOS port was checked first against the original code: tests and build passed, and monitoring worked inside a Codex-provided `PATH`. A normal desktop `PATH` failed to discover the bundled executable; desktop-app discovery and launcher environment handling address that failure. macOS/Linux shutdown remains a simulation, not a real shutdown feature.
+
+To add the checkout to Codex, use the app's project/folder picker and select this repository's directory. Cloning or launching the monitor does not register a saved project automatically.
 
 ## Repository Hygiene
 

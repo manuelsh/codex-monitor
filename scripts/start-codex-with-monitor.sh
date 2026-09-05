@@ -33,24 +33,8 @@ done
 
 script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
 
-resolve_codex_cli() {
-  if [ -n "${CODEX_MONITOR_CODEX_PATH:-}" ] && [ -x "$CODEX_MONITOR_CODEX_PATH" ]; then
-    printf '%s\n' "$CODEX_MONITOR_CODEX_PATH"
-    return 0
-  fi
-
-  if [ -n "${CODEX_BIN:-}" ] && [ -x "$CODEX_BIN" ]; then
-    printf '%s\n' "$CODEX_BIN"
-    return 0
-  fi
-
-  if command -v codex >/dev/null 2>&1; then
-    command -v codex
-    return 0
-  fi
-
-  return 1
-}
+. "$script_dir/launcher-common.sh"
+prepare_node_path
 
 run_codex_cli() {
   codex_path=$(resolve_codex_cli) || {
@@ -85,11 +69,15 @@ find_linux_desktop_id() {
 start_codex_desktop_app() {
   case "$(uname -s)" in
     Darwin*)
-      if command -v open >/dev/null 2>&1 &&
-        { [ -d "/Applications/Codex.app" ] || [ -d "$HOME/Applications/Codex.app" ]; }; then
-        open -a "Codex" >/dev/null 2>&1
-        return 0
-      fi
+      for app_root in "$HOME/Applications" /Applications; do
+        for app_name in Codex.app ChatGPT.app; do
+          app_path="$app_root/$app_name"
+          if [ -x "$app_path/Contents/Resources/codex" ] &&
+            open -a "$app_path" >/dev/null 2>&1; then
+            return 0
+          fi
+        done
+      done
       ;;
     Linux*)
       if command -v gtk-launch >/dev/null 2>&1; then

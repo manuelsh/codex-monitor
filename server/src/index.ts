@@ -172,7 +172,7 @@ const server = createServer(app);
 const wss = new WebSocketServer({
   server,
   path: "/ws",
-  verifyClient: ({ origin }) => isAllowedBrowserOrigin(origin)
+  verifyClient: ({ origin }: { origin: string }) => isAllowedBrowserOrigin(origin)
 });
 
 wss.on("connection", (socket) => {

@@ -1,0 +1,24 @@
+name: Cross-platform checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npx tsc --noEmit
+      - run: npm run build
+      - name: Check POSIX launcher syntax
+        if: runner.os != 'Windows'
+        run: for script in scripts/*.sh; do sh -n "$script"; done
