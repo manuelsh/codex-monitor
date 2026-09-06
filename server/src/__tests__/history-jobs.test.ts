@@ -203,6 +203,43 @@ describe("parseHistorySessionFile", () => {
     expect(job?.lastRunDurationMs).toBe(210000);
     expect(job?.totalDurationMs).toBe(210000);
   });
+
+  it("sums token events from the rolling 24-hour window and estimates API cost", () => {
+    const nowMs = Date.parse("2026-05-12T12:00:00.000Z");
+    const job = parseHistorySessionFile({
+      sessionId: "019e1b12-24h0-7390-9a7a-f650b0b582f8",
+      updatedAt: "2026-05-12T11:00:00.000Z",
+      nowMs,
+      fileContent: lines([
+        {
+          timestamp: "2026-05-11T10:00:00.000Z",
+          type: "turn_context",
+          payload: { model: "gpt-6-astra" }
+        },
+        tokenCountEvent("2026-05-11T10:01:00.000Z", 999, 100, 20, 10),
+        {
+          timestamp: "2026-05-11T13:00:00.000Z",
+          type: "turn_context",
+          payload: { model: "gpt-6-astra" }
+        },
+        tokenCountEvent("2026-05-11T13:01:00.000Z", 110, 100, 20, 10),
+        {
+          timestamp: "2026-05-12T10:00:00.000Z",
+          type: "turn_context",
+          payload: { model: "gpt-5.6-sol" }
+        },
+        tokenCountEvent("2026-05-12T10:01:00.000Z", 55, 50, 10, 5)
+      ])
+    });
+
+    expect(job?.last24HoursUsage).toMatchObject({
+      inputTokens: 150,
+      cachedInputTokens: 30,
+      outputTokens: 15,
+      totalTokens: 165
+    });
+    expect(job?.last24HoursEstimatedCostUsd).toBeCloseTo(0.001584, 8);
+  });
 });
 
 describe("MonitorService history jobs", () => {
@@ -347,6 +384,139 @@ describe("MonitorService history jobs", () => {
       preview: "Metadata preview"
     });
   });
+
+  it("merges multiple session files that belong to the same Codex task", async () => {
+    const taskId = "019e1b12-0000-7000-8000-000000000099";
+    writeSessionFile(
+      sessionsRoot,
+      "019e1b12-0000-7000-8000-000000000031",
+      "2026-05-12T09:00:00.000Z",
+      "cli",
+      "first task fragment",
+      { totalTokens: 100, taskId }
+    );
+    writeSessionFile(
+      sessionsRoot,
+      "019e1b12-0000-7000-8000-000000000032",
+      "2026-05-12T10:00:00.000Z",
+      "cli",
+      "second task fragment",
+      { totalTokens: 200, taskId }
+    );
+
+    const service = new MonitorService(
+      new FakeCodexClient() as never,
+      new HistoryJobReader(sessionsRoot)
+    );
+    const history = await service.listHistoryJobs({});
+
+    expect(history.data).toHaveLength(1);
+    expect(history.data[0]).toMatchObject({
+      id: taskId,
+      runCount: 2,
+      totalUsage: { totalTokens: 300 }
+    });
+  });
+
+  it("hides nested subagents and attributes their usage to the principal task", () => {
+    const principalId = "019e1b12-0000-7000-8000-000000000061";
+    const childId = "019e1b12-0000-7000-8000-000000000062";
+    const nestedChildId = "019e1b12-0000-7000-8000-000000000063";
+    writeSessionFile(
+      sessionsRoot,
+      principalId,
+      "2026-05-12T09:00:00.000Z",
+      "appServer",
+      "principal task",
+      { totalTokens: 100 }
+    );
+    writeSessionFile(
+      sessionsRoot,
+      childId,
+      "2026-05-12T09:01:00.000Z",
+      "subAgentOther",
+      "child task",
+      { totalTokens: 200, parentThreadId: principalId }
+    );
+    writeSessionFile(
+      sessionsRoot,
+      nestedChildId,
+      "2026-05-12T09:02:00.000Z",
+      "subAgentReview",
+      "nested child task",
+      { totalTokens: 300, parentThreadId: childId }
+    );
+    writeSessionFile(
+      sessionsRoot,
+      "019e1b12-0000-7000-8000-000000000064",
+      "2026-05-12T09:03:00.000Z",
+      "vscode",
+      "newer child fragment",
+      { totalTokens: 50, taskId: childId }
+    );
+
+    const history = new HistoryJobReader(sessionsRoot).listJobs({
+      nowMs: Date.parse("2026-05-12T12:00:00.000Z"),
+      usageWindow: {
+        usedPercent: 20,
+        startedAtMs: Date.parse("2026-05-12T08:00:00.000Z"),
+        resetsAt: "2026-05-19T08:00:00.000Z"
+      }
+    });
+
+    expect(history.data).toHaveLength(1);
+    expect(history.data[0]).toMatchObject({
+      id: principalId,
+      sourceKind: "appServer",
+      runCount: 1,
+      totalUsage: { totalTokens: 650 },
+      last24HoursUsage: { totalTokens: 650 },
+      sinceResetUsage: { totalTokens: 650 },
+      estimatedUsagePercentSinceReset: 20
+    });
+  });
+
+  it("allocates observed usage percent across tasks since the current reset", () => {
+    writeSessionFile(
+      sessionsRoot,
+      "019e1b12-0000-7000-8000-000000000041",
+      "2026-05-12T09:00:00.000Z",
+      "cli",
+      "smaller task",
+      { totalTokens: 100 }
+    );
+    writeSessionFile(
+      sessionsRoot,
+      "019e1b12-0000-7000-8000-000000000042",
+      "2026-05-12T10:00:00.000Z",
+      "cli",
+      "larger task",
+      { totalTokens: 300 }
+    );
+
+    const history = new HistoryJobReader(sessionsRoot).listJobs({
+      nowMs: Date.parse("2026-05-12T12:00:00.000Z"),
+      usageWindow: {
+        usedPercent: 20,
+        startedAtMs: Date.parse("2026-05-12T08:00:00.000Z"),
+        resetsAt: "2026-05-19T08:00:00.000Z"
+      }
+    });
+
+    expect(history.usageAllocation).toMatchObject({
+      status: "available",
+      usedPercent: 20,
+      basis: "tokens"
+    });
+    expect(
+      history.data.find((job) => job.id.endsWith("41"))
+        ?.estimatedUsagePercentSinceReset
+    ).toBeCloseTo(5, 8);
+    expect(
+      history.data.find((job) => job.id.endsWith("42"))
+        ?.estimatedUsagePercentSinceReset
+    ).toBeCloseTo(15, 8);
+  });
 });
 
 function writeSessionFile(
@@ -355,7 +525,12 @@ function writeSessionFile(
   timestamp: string,
   sourceKind: string,
   prompt: string,
-  options: { durationMs?: number; totalTokens?: number } = {}
+  options: {
+    durationMs?: number;
+    totalTokens?: number;
+    taskId?: string;
+    parentThreadId?: string;
+  } = {}
 ) {
   const durationMs = options.durationMs ?? 1000;
   const totalTokens = options.totalTokens ?? 100;
@@ -368,7 +543,8 @@ function writeSessionFile(
         timestamp,
         type: "session_meta",
         payload: {
-          id: sessionId,
+          id: options.taskId ?? sessionId,
+          parent_thread_id: options.parentThreadId,
           timestamp,
           cwd: "C:/repo",
           source: sourceKind
@@ -426,4 +602,36 @@ function writeSessionFile(
 
 function lines(entries: unknown[]): string {
   return entries.map((entry) => JSON.stringify(entry)).join("\n");
+}
+
+function tokenCountEvent(
+  timestamp: string,
+  totalTokens: number,
+  inputTokens: number,
+  cachedInputTokens: number,
+  outputTokens: number
+) {
+  return {
+    timestamp,
+    type: "event_msg",
+    payload: {
+      type: "token_count",
+      info: {
+        total_token_usage: {
+          input_tokens: inputTokens,
+          cached_input_tokens: cachedInputTokens,
+          output_tokens: outputTokens,
+          reasoning_output_tokens: 0,
+          total_tokens: totalTokens
+        },
+        last_token_usage: {
+          input_tokens: inputTokens,
+          cached_input_tokens: cachedInputTokens,
+          output_tokens: outputTokens,
+          reasoning_output_tokens: 0,
+          total_tokens: totalTokens
+        }
+      }
+    }
+  };
 }

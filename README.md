@@ -1,6 +1,21 @@
 # Codex Monitor
 
-Codex Monitor is a simple local dashboard for watching and monitoring Codex work that is running on your machine, showing your usage compared to the time to the next reset. It connects to `codex app-server`, reads local Codex session history, shows active root threads and spawned agents, and can optionally schedule a Windows shutdown after work has settled.
+Codex Monitor is a local dashboard for monitoring Codex work and usage on your
+machine. It combines live data from `codex app-server` with local Codex session
+history to monitor:
+
+- active tasks, spawned agents, pending approvals, and requests for user input;
+- total Codex quota used, elapsed quota-window time, and the next reset;
+- rolling 24-hour token usage for each task using a true sliding window;
+- each task's API-equivalent USD cost, estimated from its recorded model, input,
+  cached input, cache writes, output, and long-context pricing;
+- each task's estimated share of the real total Codex usage since the current
+  reset, allocated by API-equivalent cost when pricing is available and by token
+  share otherwise; and
+- subagent usage consolidated into the principal task, including nested
+  subagents, rather than displayed as separate history entries.
+
+It can also schedule a Windows shutdown after monitored work has settled.
 
 The app is intentionally small: an Express/WebSocket backend, a React/Vite frontend, and shared TypeScript types.
 
@@ -34,7 +49,18 @@ Codex Monitor is designed for local use only.
 - Task titles that match Codex thread titles when Codex exposes them.
 - Pending approval or user-input states.
 - Previous Codex work parsed from local JSONL history.
-- Runtime and token metrics when Codex recorded them.
+- Runtime and token metrics when Codex recorded them, including rolling 24-hour
+  token usage per task and an API-equivalent USD estimate based on the recorded
+  model, cached-input discounts, and standard API token prices. The estimate is
+  not a ChatGPT plan charge and excludes tool-call fees. Subagents are not shown
+  as separate history rows. Their usage, including nested subagents, is
+  consolidated into the root task when the parent chain is available in local
+  history; legacy sessions without parent metadata cannot be attributed.
+- The history view also shows the real total `usedPercent` for the current
+  primary Codex quota window and estimates each local task's share since that
+  window began. Allocation uses API-equivalent cost when all recorded models
+  have known pricing, otherwise it falls back to token share. Per-task
+  percentages are estimates and may omit activity not present in local history.
 - Current Codex usage and reset windows when `codex app-server` exposes rate-limit data.
 - Optional Windows shutdown automation, with dry-run behavior on macOS and Linux.
 

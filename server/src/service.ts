@@ -192,8 +192,36 @@ export class MonitorService extends EventEmitter<{ change: [MonitorSnapshot] }> 
 
     return this.historyJobReader.listJobs({
       ...args,
-      metadataById
+      metadataById,
+      usageWindow: this.getPrimaryUsageWindow()
     });
+  }
+
+  private getPrimaryUsageWindow(): {
+    usedPercent: number;
+    startedAtMs: number;
+    resetsAt: string;
+  } | null {
+    const window = this.codexUsage.primaryLimit?.primary;
+    if (
+      window?.usedPercent === null ||
+      window?.usedPercent === undefined ||
+      window.windowDurationMins === null ||
+      !window.resetsAt
+    ) {
+      return null;
+    }
+
+    const resetsAtMs = Date.parse(window.resetsAt);
+    if (!Number.isFinite(resetsAtMs)) {
+      return null;
+    }
+
+    return {
+      usedPercent: window.usedPercent,
+      startedAtMs: resetsAtMs - window.windowDurationMins * 60_000,
+      resetsAt: window.resetsAt
+    };
   }
 
   private async getHistoryThreadMetadata(): Promise<Map<string, HistoryJobMetadata>> {

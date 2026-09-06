@@ -11,17 +11,17 @@ const DEFAULT_FILTERS = [
   "appServer",
   "vscode",
   "cli",
-  "subAgent",
-  "subAgentOther"
+  "exec"
 ];
 const PAGE_SIZE = 18;
 
 const SORT_OPTIONS: Array<{ value: HistoryJobSortKey; label: string }> = [
   { value: "updatedAt", label: "Last activity" },
   { value: "createdAt", label: "Created" },
-  { value: "lastRunDurationMs", label: "Last run time" },
+  { value: "last24HoursCostUsd", label: "Rolling 24h API equivalent" },
+  { value: "last24HoursTokens", label: "Rolling 24h tokens" },
+  { value: "estimatedUsagePercentSinceReset", label: "Estimated usage since reset" },
   { value: "totalDurationMs", label: "Total runtime" },
-  { value: "lastRunTokens", label: "Last run tokens" },
   { value: "totalTokens", label: "Total tokens" },
   { value: "runCount", label: "Run count" }
 ];
@@ -43,10 +43,7 @@ export function HistoryPanel() {
       "appServer",
       "vscode",
       "cli",
-      "exec",
-      "subAgent",
-      "subAgentReview",
-      "subAgentOther"
+      "exec"
     ],
     []
   );
@@ -56,8 +53,8 @@ export function HistoryPanel() {
     setLoading(true);
     setNextCursor(null);
 
-    void api
-      .fetchHistoryJobs({
+    const refreshHistory = () => {
+      void api.fetchHistoryJobs({
         sourceKinds,
         searchTerm,
         sortKey,
@@ -89,9 +86,14 @@ export function HistoryPanel() {
           setLoading(false);
         }
       });
+    };
+
+    refreshHistory();
+    const refreshHandle = window.setInterval(refreshHistory, 30_000);
 
     return () => {
       disposed = true;
+      window.clearInterval(refreshHandle);
     };
   }, [searchTerm, sortDirection, sortKey, sourceKinds]);
 
@@ -219,17 +221,19 @@ export function HistoryPanel() {
             <p>{job.preview ?? "No preview available."}</p>
             <div className="history-metrics">
               <HistoryMetric
-                label="Last run"
-                value={formatDuration(job.lastRunDurationMs)}
+                label="Rolling 24h $"
+                value={formatEstimatedCost(job.last24HoursEstimatedCostUsd)}
+                title="Estimated at standard API token prices for the recorded model. This is not a ChatGPT plan charge and excludes tool-call fees."
               />
               <HistoryMetric
-                label="Total"
-                value={formatDuration(job.totalDurationMs)}
+                label="Rolling 24h tokens"
+                value={formatTokenUsage(job.last24HoursUsage)}
+                title={formatTokenUsageDetails(job.last24HoursUsage)}
               />
               <HistoryMetric
-                label="Last tokens"
-                value={formatTokenUsage(job.lastRunUsage)}
-                title={formatTokenUsageDetails(job.lastRunUsage)}
+                label="Since reset (est.)"
+                value={formatUsagePercent(job.estimatedUsagePercentSinceReset)}
+                title="Estimated share of the observed total Codex usage since the current reset. Allocated across locally recorded tasks; it is not an OpenAI per-task measurement."
               />
               <HistoryMetric
                 label="Total tokens"
@@ -346,9 +350,34 @@ function formatTokenUsageDetails(usage: TokenUsage | null): string | undefined {
     `${numberFormat.format(usage.totalTokens)} total`,
     `${numberFormat.format(usage.inputTokens)} input`,
     `${numberFormat.format(usage.cachedInputTokens)} cached`,
+    `${numberFormat.format(usage.cacheWriteInputTokens ?? 0)} cache writes`,
     `${numberFormat.format(usage.outputTokens)} output`,
     `${numberFormat.format(usage.reasoningOutputTokens)} reasoning`
   ].join(", ");
+}
+
+function formatEstimatedCost(costUsd: number | null): string {
+  if (costUsd === null || !Number.isFinite(costUsd)) {
+    return "--";
+  }
+
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: costUsd < 0.01 ? 3 : 2,
+    maximumFractionDigits: costUsd < 0.01 ? 3 : 2
+  }).format(costUsd);
+}
+
+function formatUsagePercent(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) {
+    return "--";
+  }
+
+  return `${new Intl.NumberFormat(undefined, {
+    minimumFractionDigits: value > 0 && value < 0.1 ? 2 : 1,
+    maximumFractionDigits: value > 0 && value < 0.1 ? 2 : 1
+  }).format(value)}%`;
 }
 
 function formatDateTime(isoValue: string): string {

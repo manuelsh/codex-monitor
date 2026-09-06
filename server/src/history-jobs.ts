@@ -8,6 +8,7 @@ import {
   type HistoryJob,
   type HistoryJobListResponse,
   type HistoryJobSortKey,
+  type HistoryUsageAllocation,
   type SourceKind,
   type SortDirection,
   type TokenUsage
@@ -23,7 +24,14 @@ type SessionFile = {
 type CachedHistoryJob = {
   mtimeMs: number;
   size: number;
-  job: HistoryJob | null;
+  parsedAtMs: number;
+  usageWindowStartedAtMs: number | null;
+  job: ParsedHistoryJob | null;
+};
+
+type ParsedHistoryJob = HistoryJob & {
+  parentThreadId: string | null;
+  isSubagent: boolean;
 };
 
 export type HistoryJobMetadata = Partial<
@@ -46,6 +54,29 @@ type ParsedTurn = {
   durationMs: number | null;
 };
 
+type ModelPricing = {
+  input: number;
+  cachedInput: number;
+  cacheWriteInput: number;
+  output: number;
+};
+
+const ROLLING_USAGE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+// Standard API prices in USD per million tokens, verified 2026-09-06.
+// This is an API-equivalent estimate: ChatGPT plan usage is not billed this way.
+const MODEL_PRICING: Record<string, ModelPricing> = {
+  "gpt-6-astra": { input: 10, cachedInput: 1, cacheWriteInput: 12.5, output: 50 },
+  "gpt-5.6-sol": { input: 4, cachedInput: 0.4, cacheWriteInput: 5, output: 20 },
+  "gpt-5.6-terra": { input: 2, cachedInput: 0.2, cacheWriteInput: 2.5, output: 12 },
+  "gpt-5.6-luna": { input: 0.2, cachedInput: 0.02, cacheWriteInput: 0.25, output: 1.2 },
+  "gpt-5.5": { input: 5, cachedInput: 0.5, cacheWriteInput: 6.25, output: 30 },
+  "gpt-5.4-mini": { input: 0.75, cachedInput: 0.075, cacheWriteInput: 0.9375, output: 4.5 },
+  "gpt-5.3-codex": { input: 1.75, cachedInput: 0.175, cacheWriteInput: 2.1875, output: 14 },
+  "gpt-5.2-codex": { input: 1.75, cachedInput: 0.175, cacheWriteInput: 2.1875, output: 14 },
+  "gpt-5-codex": { input: 1.25, cachedInput: 0.125, cacheWriteInput: 1.5625, output: 10 }
+};
+
 const ACTIVE_OPEN_TURN_WINDOW_MS = 15 * 60 * 1000;
 
 export class HistoryJobReader {
@@ -62,6 +93,11 @@ export class HistoryJobReader {
     sortDirection?: string | null;
     metadataById?: Map<string, HistoryJobMetadata> | null;
     nowMs?: number;
+    usageWindow?: {
+      usedPercent: number;
+      startedAtMs: number;
+      resetsAt: string;
+    } | null;
   }): HistoryJobListResponse {
     const nowMs = args.nowMs ?? Date.now();
     const sessionFiles = listSessionFiles(this.sessionsRoot);
@@ -83,9 +119,16 @@ export class HistoryJobReader {
     const sortKey = normalizeSortKey(args.sortKey);
     const sortDirection = normalizeSortDirection(args.sortDirection);
 
-    const jobs = sessionFiles
-      .map((file) => this.readJob(file, nowMs))
-      .filter((job): job is HistoryJob => Boolean(job))
+    const parsedJobs = sessionFiles
+      .map((file) =>
+        this.readJob(file, nowMs, args.usageWindow?.startedAtMs ?? null)
+      )
+      .filter((job): job is ParsedHistoryJob => Boolean(job));
+    const allJobs = allocateUsageSinceReset(
+      consolidateSubagentUsage(mergeJobsByTask(parsedJobs)),
+      args.usageWindow ?? null
+    );
+    const jobs = allJobs
       .map((job) => applyMetadata(job, args.metadataById?.get(job.id)))
       .filter((job) => !sourceKindSet || sourceKindSet.has(job.sourceKind))
       .filter((job) => matchesSearch(job, searchTerm))
@@ -96,16 +139,24 @@ export class HistoryJobReader {
     return {
       data: jobs.slice(offset, offset + limit),
       total: jobs.length,
-      nextCursor: offset + limit < jobs.length ? String(offset + limit) : null
+      nextCursor: offset + limit < jobs.length ? String(offset + limit) : null,
+      usageAllocation: usageAllocationSummary(args.usageWindow ?? null, allJobs)
     };
   }
 
-  private readJob(file: SessionFile, nowMs: number): HistoryJob | null {
+  private readJob(
+    file: SessionFile,
+    nowMs: number,
+    usageWindowStartedAtMs: number | null
+  ): ParsedHistoryJob | null {
     const cached = this.cache.get(file.path);
     if (
       cached &&
       cached.mtimeMs === file.mtimeMs &&
       cached.size === file.size &&
+      cached.usageWindowStartedAtMs === usageWindowStartedAtMs &&
+      (isRollingUsageStable(cached.job, nowMs) ||
+        nowMs - cached.parsedAtMs < 60_000) &&
       !hasRecentOpenTurn(cached.job, nowMs)
     ) {
       return cloneValue(cached.job);
@@ -118,6 +169,8 @@ export class HistoryJobReader {
       this.cache.set(file.path, {
         mtimeMs: file.mtimeMs,
         size: file.size,
+        parsedAtMs: nowMs,
+        usageWindowStartedAtMs,
         job: null
       });
       return null;
@@ -127,16 +180,238 @@ export class HistoryJobReader {
       sessionId: extractSessionId(file.path),
       fileContent,
       updatedAt: new Date(file.mtimeMs).toISOString(),
-      nowMs
+      nowMs,
+      usageWindowStartedAtMs
     });
 
     this.cache.set(file.path, {
       mtimeMs: file.mtimeMs,
       size: file.size,
+      parsedAtMs: nowMs,
+      usageWindowStartedAtMs,
       job
     });
     return cloneValue(job);
   }
+}
+
+function mergeJobsByTask(jobs: ParsedHistoryJob[]): ParsedHistoryJob[] {
+  const merged = new Map<string, ParsedHistoryJob>();
+
+  for (const job of jobs) {
+    const existing = merged.get(job.id);
+    if (!existing) {
+      merged.set(job.id, job);
+      continue;
+    }
+
+    const newer = job.updatedAt > existing.updatedAt ? job : existing;
+    const older = newer === job ? existing : job;
+    const newerLastRun =
+      (dateValue(job.lastRunStartedAt) ?? Number.NEGATIVE_INFINITY) >
+      (dateValue(existing.lastRunStartedAt) ?? Number.NEGATIVE_INFINITY)
+        ? job
+        : existing;
+    const hasUnpricedRecentUsage =
+      (Boolean(existing.last24HoursUsage) &&
+        existing.last24HoursEstimatedCostUsd === null) ||
+      (Boolean(job.last24HoursUsage) &&
+        job.last24HoursEstimatedCostUsd === null);
+
+    merged.set(job.id, {
+      ...newer,
+      parentThreadId: newer.parentThreadId ?? older.parentThreadId,
+      isSubagent: newer.isSubagent || older.isSubagent,
+      name: newer.name ?? older.name,
+      preview: newer.preview ?? older.preview,
+      createdAt: earliestIso(existing.createdAt, job.createdAt),
+      runCount: existing.runCount + job.runCount,
+      lastRunStartedAt: newerLastRun.lastRunStartedAt,
+      lastRunCompletedAt: newerLastRun.lastRunCompletedAt,
+      lastRunDurationMs: newerLastRun.lastRunDurationMs,
+      lastRunUsage: newerLastRun.lastRunUsage,
+      totalDurationMs: existing.totalDurationMs + job.totalDurationMs,
+      totalUsage: addNullableTokenUsage(existing.totalUsage, job.totalUsage),
+      last24HoursUsage: addNullableTokenUsage(
+        existing.last24HoursUsage,
+        job.last24HoursUsage
+      ),
+      last24HoursEstimatedCostUsd: hasUnpricedRecentUsage
+        ? null
+        : addNullableNumbers(
+            existing.last24HoursEstimatedCostUsd,
+            job.last24HoursEstimatedCostUsd
+          ),
+      sinceResetUsage: addNullableTokenUsage(
+        existing.sinceResetUsage,
+        job.sinceResetUsage
+      ),
+      sinceResetEstimatedCostUsd:
+        (Boolean(existing.sinceResetUsage) &&
+          existing.sinceResetEstimatedCostUsd === null) ||
+        (Boolean(job.sinceResetUsage) && job.sinceResetEstimatedCostUsd === null)
+          ? null
+          : addNullableNumbers(
+              existing.sinceResetEstimatedCostUsd,
+              job.sinceResetEstimatedCostUsd
+            ),
+      estimatedUsagePercentSinceReset: null
+    });
+  }
+
+  return [...merged.values()];
+}
+
+function consolidateSubagentUsage(jobs: ParsedHistoryJob[]): ParsedHistoryJob[] {
+  const jobsById = new Map<string, ParsedHistoryJob>(
+    jobs.map((job): [string, ParsedHistoryJob] => [job.id, { ...job }])
+  );
+  const consolidatedIds = new Set<string>();
+
+  for (const job of jobs) {
+    if (!job.isSubagent || !job.parentThreadId) {
+      continue;
+    }
+
+    const principal = findPrincipalAncestor(job, jobsById);
+    if (!principal) {
+      continue;
+    }
+
+    const target = jobsById.get(principal.id);
+    if (!target) {
+      continue;
+    }
+
+    target.updatedAt = latestIso(target.updatedAt, job.updatedAt);
+    target.totalUsage = addNullableTokenUsage(target.totalUsage, job.totalUsage);
+    target.last24HoursEstimatedCostUsd = addEstimatedCosts(
+      target.last24HoursUsage,
+      target.last24HoursEstimatedCostUsd,
+      job.last24HoursUsage,
+      job.last24HoursEstimatedCostUsd
+    );
+    target.last24HoursUsage = addNullableTokenUsage(
+      target.last24HoursUsage,
+      job.last24HoursUsage
+    );
+    target.sinceResetEstimatedCostUsd = addEstimatedCosts(
+      target.sinceResetUsage,
+      target.sinceResetEstimatedCostUsd,
+      job.sinceResetUsage,
+      job.sinceResetEstimatedCostUsd
+    );
+    target.sinceResetUsage = addNullableTokenUsage(
+      target.sinceResetUsage,
+      job.sinceResetUsage
+    );
+    consolidatedIds.add(job.id);
+  }
+
+  return [...jobsById.values()].filter(
+    (job) => !job.isSubagent && !consolidatedIds.has(job.id)
+  );
+}
+
+function findPrincipalAncestor(
+  job: ParsedHistoryJob,
+  jobsById: Map<string, ParsedHistoryJob>
+): ParsedHistoryJob | null {
+  const visited = new Set([job.id]);
+  let current = job;
+
+  while (current.parentThreadId) {
+    if (visited.has(current.parentThreadId)) {
+      return null;
+    }
+    visited.add(current.parentThreadId);
+
+    const parent = jobsById.get(current.parentThreadId);
+    if (!parent) {
+      return null;
+    }
+    if (!parent.isSubagent) {
+      return parent;
+    }
+    current = parent;
+  }
+
+  return null;
+}
+
+function isSubagentSource(sourceKind: SourceKind | "unknown"): boolean {
+  return sourceKind.startsWith("subAgent");
+}
+
+function allocateUsageSinceReset(
+  jobs: HistoryJob[],
+  window: { usedPercent: number; startedAtMs: number; resetsAt: string } | null
+): HistoryJob[] {
+  if (!window) {
+    return jobs.map((job) => ({
+      ...job,
+      estimatedUsagePercentSinceReset: null
+    }));
+  }
+
+  const basis = usageAllocationBasis(jobs);
+  const totalWeight = jobs.reduce(
+    (total, job) => total + usageAllocationWeight(job, basis),
+    0
+  );
+
+  return jobs.map((job) => ({
+    ...job,
+    estimatedUsagePercentSinceReset:
+      totalWeight > 0
+        ? (window.usedPercent * usageAllocationWeight(job, basis)) / totalWeight
+        : null
+  }));
+}
+
+function usageAllocationSummary(
+  window: { usedPercent: number; startedAtMs: number; resetsAt: string } | null,
+  jobs: HistoryJob[]
+): HistoryUsageAllocation {
+  if (!window) {
+    return {
+      status: "unavailable",
+      usedPercent: null,
+      windowStartedAt: null,
+      resetsAt: null,
+      basis: null
+    };
+  }
+
+  const hasUsage = jobs.some((job) => (job.sinceResetUsage?.totalTokens ?? 0) > 0);
+  return {
+    status: "available",
+    usedPercent: window.usedPercent,
+    windowStartedAt: new Date(window.startedAtMs).toISOString(),
+    resetsAt: window.resetsAt,
+    basis: hasUsage ? usageAllocationBasis(jobs) : null
+  };
+}
+
+function usageAllocationBasis(
+  jobs: HistoryJob[]
+): "apiEquivalentCost" | "tokens" {
+  const jobsWithUsage = jobs.filter(
+    (job) => (job.sinceResetUsage?.totalTokens ?? 0) > 0
+  );
+  return jobsWithUsage.length > 0 &&
+    jobsWithUsage.every((job) => job.sinceResetEstimatedCostUsd !== null)
+    ? "apiEquivalentCost"
+    : "tokens";
+}
+
+function usageAllocationWeight(
+  job: HistoryJob,
+  basis: "apiEquivalentCost" | "tokens"
+): number {
+  return basis === "apiEquivalentCost"
+    ? job.sinceResetEstimatedCostUsd ?? 0
+    : job.sinceResetUsage?.totalTokens ?? 0;
 }
 
 function applyMetadata(
@@ -164,8 +439,11 @@ export function parseHistorySessionFile(args: {
   fileContent: string;
   updatedAt: string;
   nowMs: number;
-}): HistoryJob | null {
+  usageWindowStartedAtMs?: number | null;
+}): ParsedHistoryJob | null {
   let sessionId = args.sessionId;
+  let parentThreadId: string | null = null;
+  let isSubagent = false;
   let name: string | null = null;
   let preview: string | null = null;
   let sourceKind: SourceKind | "unknown" = "unknown";
@@ -179,6 +457,13 @@ export function parseHistorySessionFile(args: {
   let modelProvider: string | null = null;
   let lastRunUsage: TokenUsage | null = null;
   let totalUsage: TokenUsage | null = null;
+  let activeModel: string | null = null;
+  let last24HoursUsage: TokenUsage | null = null;
+  let last24HoursEstimatedCostUsd = 0;
+  let last24HoursCostIsComplete = true;
+  let sinceResetUsage: TokenUsage | null = null;
+  let sinceResetEstimatedCostUsd = 0;
+  let sinceResetCostIsComplete = true;
   let latestTurnId: string | null = null;
   const turns = new Map<string, ParsedTurn>();
 
@@ -216,16 +501,23 @@ export function parseHistorySessionFile(args: {
 
     if (recordType === "session_meta") {
       sessionId = asString(payload?.id) ?? sessionId;
+      parentThreadId =
+        asString(payload?.parent_thread_id) ??
+        asString(payload?.parentThreadId) ??
+        parentThreadId;
       name = asString(payload?.name) ?? name;
       cwd = asString(payload?.cwd) ?? cwd;
       modelProvider =
         asString(payload?.model_provider) ??
         asString(payload?.modelProvider) ??
         modelProvider;
-      sourceKind =
+      const sessionSourceKind =
         normalizeSourceKind(payload?.source) ??
-        normalizeOriginator(payload?.originator) ??
-        sourceKind;
+        normalizeOriginator(payload?.originator);
+      sourceKind = sessionSourceKind ?? sourceKind;
+      isSubagent =
+        isSubagent ||
+        (sessionSourceKind !== null && isSubagentSource(sessionSourceKind));
       createdAtMs =
         parseDateMs(payload?.timestamp) ?? parseDateMs(record.timestamp) ?? createdAtMs;
       continue;
@@ -237,6 +529,7 @@ export function parseHistorySessionFile(args: {
         asString(payload?.model_provider) ??
         asString(payload?.modelProvider) ??
         modelProvider;
+      activeModel = asString(payload?.model) ?? activeModel;
       continue;
     }
 
@@ -286,6 +579,40 @@ export function parseHistorySessionFile(args: {
       const info = asRecord(payload?.info);
       totalUsage = normalizeTokenUsage(info?.total_token_usage) ?? totalUsage;
       lastRunUsage = normalizeTokenUsage(info?.last_token_usage) ?? lastRunUsage;
+
+      if (
+        recordTimestampMs !== null &&
+        recordTimestampMs >= args.nowMs - ROLLING_USAGE_WINDOW_MS
+      ) {
+        const increment = normalizeTokenUsage(info?.last_token_usage);
+        if (increment) {
+          last24HoursUsage = addTokenUsage(last24HoursUsage, increment);
+          const estimatedCost = estimateApiEquivalentCost(increment, activeModel);
+          if (estimatedCost === null) {
+            last24HoursCostIsComplete = false;
+          } else {
+            last24HoursEstimatedCostUsd += estimatedCost;
+          }
+        }
+      }
+
+      if (
+        args.usageWindowStartedAtMs !== null &&
+        args.usageWindowStartedAtMs !== undefined &&
+        recordTimestampMs !== null &&
+        recordTimestampMs >= args.usageWindowStartedAtMs
+      ) {
+        const increment = normalizeTokenUsage(info?.last_token_usage);
+        if (increment) {
+          sinceResetUsage = addTokenUsage(sinceResetUsage, increment);
+          const estimatedCost = estimateApiEquivalentCost(increment, activeModel);
+          if (estimatedCost === null) {
+            sinceResetCostIsComplete = false;
+          } else {
+            sinceResetEstimatedCostUsd += estimatedCost;
+          }
+        }
+      }
     }
   }
 
@@ -309,6 +636,8 @@ export function parseHistorySessionFile(args: {
 
   return {
     id: sessionId,
+    parentThreadId,
+    isSubagent,
     name,
     preview,
     sourceKind,
@@ -330,7 +659,18 @@ export function parseHistorySessionFile(args: {
       : null,
     totalDurationMs,
     lastRunUsage,
-    totalUsage
+    totalUsage,
+    last24HoursUsage,
+    last24HoursEstimatedCostUsd:
+      last24HoursUsage && last24HoursCostIsComplete
+        ? last24HoursEstimatedCostUsd
+        : null,
+    sinceResetUsage,
+    sinceResetEstimatedCostUsd:
+      sinceResetUsage && sinceResetCostIsComplete
+        ? sinceResetEstimatedCostUsd
+        : null,
+    estimatedUsagePercentSinceReset: null
   };
 }
 
@@ -434,6 +774,18 @@ function hasRecentOpenTurn(job: HistoryJob | null, nowMs: number): boolean {
     : false;
 }
 
+function isRollingUsageStable(job: HistoryJob | null, nowMs: number): boolean {
+  if (!job) {
+    return true;
+  }
+
+  const updatedAtMs = Date.parse(job.updatedAt);
+  return (
+    Number.isFinite(updatedAtMs) &&
+    updatedAtMs < nowMs - ROLLING_USAGE_WINDOW_MS
+  );
+}
+
 function turnSortMs(turn: ParsedTurn): number {
   return turn.startedAtMs ?? turn.completedAtMs ?? 0;
 }
@@ -484,6 +836,12 @@ function sortValue(job: HistoryJob, sortKey: HistoryJobSortKey): number | null {
       return job.lastRunUsage?.totalTokens ?? null;
     case "totalTokens":
       return job.totalUsage?.totalTokens ?? null;
+    case "last24HoursTokens":
+      return job.last24HoursUsage?.totalTokens ?? null;
+    case "last24HoursCostUsd":
+      return job.last24HoursEstimatedCostUsd;
+    case "estimatedUsagePercentSinceReset":
+      return job.estimatedUsagePercentSinceReset;
     case "runCount":
       return job.runCount;
     case "updatedAt":
@@ -521,6 +879,45 @@ function dateValue(value: string | null): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function earliestIso(left: string | null, right: string | null): string | null {
+  if (!left) return right;
+  if (!right) return left;
+  return left < right ? left : right;
+}
+
+function latestIso(left: string, right: string): string {
+  return left > right ? left : right;
+}
+
+function addNullableNumbers(
+  left: number | null,
+  right: number | null
+): number | null {
+  if (left === null && right === null) return null;
+  return (left ?? 0) + (right ?? 0);
+}
+
+function addEstimatedCosts(
+  leftUsage: TokenUsage | null,
+  leftCost: number | null,
+  rightUsage: TokenUsage | null,
+  rightCost: number | null
+): number | null {
+  if ((leftUsage && leftCost === null) || (rightUsage && rightCost === null)) {
+    return null;
+  }
+  return addNullableNumbers(leftCost, rightCost);
+}
+
+function addNullableTokenUsage(
+  left: TokenUsage | null,
+  right: TokenUsage | null
+): TokenUsage | null {
+  if (!left) return right;
+  if (!right) return left;
+  return addTokenUsage(left, right);
+}
+
 function isUserMessage(payload: Record<string, unknown> | null): boolean {
   return asString(payload?.type) === "message" && asString(payload?.role) === "user";
 }
@@ -549,6 +946,7 @@ function normalizeTokenUsage(value: unknown): TokenUsage | null {
 
   const inputTokens = asFiniteNumber(record.input_tokens) ?? 0;
   const cachedInputTokens = asFiniteNumber(record.cached_input_tokens) ?? 0;
+  const cacheWriteInputTokens = asFiniteNumber(record.cache_write_input_tokens) ?? 0;
   const outputTokens = asFiniteNumber(record.output_tokens) ?? 0;
   const reasoningOutputTokens = asFiniteNumber(record.reasoning_output_tokens) ?? 0;
   const totalTokens =
@@ -557,10 +955,53 @@ function normalizeTokenUsage(value: unknown): TokenUsage | null {
   return {
     inputTokens,
     cachedInputTokens,
+    cacheWriteInputTokens,
     outputTokens,
     reasoningOutputTokens,
     totalTokens
   };
+}
+
+function addTokenUsage(
+  total: TokenUsage | null,
+  increment: TokenUsage
+): TokenUsage {
+  return {
+    inputTokens: (total?.inputTokens ?? 0) + increment.inputTokens,
+    cachedInputTokens: (total?.cachedInputTokens ?? 0) + increment.cachedInputTokens,
+    cacheWriteInputTokens:
+      (total?.cacheWriteInputTokens ?? 0) + (increment.cacheWriteInputTokens ?? 0),
+    outputTokens: (total?.outputTokens ?? 0) + increment.outputTokens,
+    reasoningOutputTokens:
+      (total?.reasoningOutputTokens ?? 0) + increment.reasoningOutputTokens,
+    totalTokens: (total?.totalTokens ?? 0) + increment.totalTokens
+  };
+}
+
+function estimateApiEquivalentCost(
+  usage: TokenUsage,
+  model: string | null
+): number | null {
+  const pricing = model ? MODEL_PRICING[model] : null;
+  if (!pricing) {
+    return null;
+  }
+
+  const highContext = usage.inputTokens > 272000;
+  const inputMultiplier = highContext ? 2 : 1;
+  const outputMultiplier = highContext ? 1.5 : 1;
+  const cachedInput = Math.min(usage.cachedInputTokens, usage.inputTokens);
+  const uncachedInput = Math.max(0, usage.inputTokens - cachedInput);
+
+  return (
+    (uncachedInput * pricing.input * inputMultiplier +
+      cachedInput * pricing.cachedInput * inputMultiplier +
+      (usage.cacheWriteInputTokens ?? 0) *
+        pricing.cacheWriteInput *
+        inputMultiplier +
+      usage.outputTokens * pricing.output * outputMultiplier) /
+    1_000_000
+  );
 }
 
 function normalizeSourceKind(value: unknown): SourceKind | "unknown" | null {

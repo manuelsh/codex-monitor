@@ -19,6 +19,9 @@ export const HUMAN_WAIT_FLAGS = [
 export const HISTORY_JOB_SORT_KEYS = [
   "updatedAt",
   "createdAt",
+  "last24HoursCostUsd",
+  "last24HoursTokens",
+  "estimatedUsagePercentSinceReset",
   "lastRunDurationMs",
   "totalDurationMs",
   "lastRunTokens",
@@ -253,6 +256,7 @@ export interface CodexUsageSnapshot {
 export interface TokenUsage {
   inputTokens: number;
   cachedInputTokens: number;
+  cacheWriteInputTokens?: number;
   outputTokens: number;
   reasoningOutputTokens: number;
   totalTokens: number;
@@ -274,12 +278,26 @@ export interface HistoryJob {
   totalDurationMs: number;
   lastRunUsage: TokenUsage | null;
   totalUsage: TokenUsage | null;
+  last24HoursUsage: TokenUsage | null;
+  last24HoursEstimatedCostUsd: number | null;
+  sinceResetUsage: TokenUsage | null;
+  sinceResetEstimatedCostUsd: number | null;
+  estimatedUsagePercentSinceReset: number | null;
+}
+
+export interface HistoryUsageAllocation {
+  status: "available" | "unavailable";
+  usedPercent: number | null;
+  windowStartedAt: string | null;
+  resetsAt: string | null;
+  basis: "apiEquivalentCost" | "tokens" | null;
 }
 
 export interface HistoryJobListResponse {
   data: HistoryJob[];
   total: number;
   nextCursor: string | null;
+  usageAllocation: HistoryUsageAllocation;
 }
 
 export interface MonitorSnapshot {
