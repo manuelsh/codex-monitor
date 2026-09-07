@@ -33,7 +33,7 @@ export function TranscriptPanel({
             <article key={turn.id} className="turn-block">
               <header className="turn-header">
                 <span className={`status-pill ${toneFromTurn(turn.status)}`}>{turn.status}</span>
-                <span className="panel-meta">{new Date(turn.startedAt).toLocaleTimeString()}</span>
+                <span className="panel-meta">{new Date(turn.startedAt).toLocaleTimeString("en")}</span>
               </header>
 
               {turn.itemIds.map((itemId) => {

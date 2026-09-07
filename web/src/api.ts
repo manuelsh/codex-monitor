@@ -83,6 +83,7 @@ export const api = {
     limit?: number;
     sortKey?: HistoryJobSortKey;
     sortDirection?: SortDirection;
+    signal?: AbortSignal;
   }): Promise<HistoryJobListResponse> {
     const params = new URLSearchParams();
     params.set("sourceKinds", args.sourceKinds.join(","));
@@ -101,7 +102,8 @@ export const api = {
     }
 
     return jsonFetch<HistoryJobListResponse>(
-      `/api/history/jobs?${params.toString()}`
+      `/api/history/jobs?${params.toString()}`,
+      { signal: args.signal }
     );
   }
 };

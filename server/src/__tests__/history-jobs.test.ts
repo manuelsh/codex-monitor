@@ -239,6 +239,35 @@ describe("parseHistorySessionFile", () => {
       totalTokens: 165
     });
     expect(job?.last24HoursEstimatedCostUsd).toBeCloseTo(0.001584, 8);
+    expect(job?.totalUsage).toMatchObject({ totalTokens: 1164 });
+    expect(job?.totalEstimatedCostUsd).toBeCloseTo(0.002904, 8);
+    expect(job?.totalEstimatedCostIsComplete).toBe(true);
+  });
+
+  it("keeps a marked lower-bound cost when some recorded models are unpriced", () => {
+    const job = parseHistorySessionFile({
+      sessionId: "019e1b12-cost-7390-9a7a-f650b0b582f8",
+      updatedAt: "2026-05-12T11:00:00.000Z",
+      nowMs: Date.parse("2026-05-12T12:00:00.000Z"),
+      fileContent: lines([
+        {
+          timestamp: "2026-05-12T09:00:00.000Z",
+          type: "turn_context",
+          payload: { model: "gpt-5.6" }
+        },
+        tokenCountEvent("2026-05-12T09:01:00.000Z", 110, 100, 20, 10),
+        {
+          timestamp: "2026-05-12T10:00:00.000Z",
+          type: "turn_context",
+          payload: { model: "codex-auto-review" }
+        },
+        tokenCountEvent("2026-05-12T10:01:00.000Z", 55, 50, 10, 5)
+      ])
+    });
+
+    expect(job?.totalUsage).toMatchObject({ totalTokens: 165 });
+    expect(job?.totalEstimatedCostUsd).toBeCloseTo(0.000528, 8);
+    expect(job?.totalEstimatedCostIsComplete).toBe(false);
   });
 });
 
@@ -460,7 +489,9 @@ describe("MonitorService history jobs", () => {
       usageWindow: {
         usedPercent: 20,
         startedAtMs: Date.parse("2026-05-12T08:00:00.000Z"),
-        resetsAt: "2026-05-19T08:00:00.000Z"
+        resetsAt: "2026-05-19T08:00:00.000Z",
+        limitName: "Overall Codex",
+        windowLabel: "Weekly"
       }
     });
 
@@ -499,23 +530,27 @@ describe("MonitorService history jobs", () => {
       usageWindow: {
         usedPercent: 20,
         startedAtMs: Date.parse("2026-05-12T08:00:00.000Z"),
-        resetsAt: "2026-05-19T08:00:00.000Z"
+        resetsAt: "2026-05-19T08:00:00.000Z",
+        limitName: "Overall Codex",
+        windowLabel: "Weekly"
       }
     });
 
     expect(history.usageAllocation).toMatchObject({
       status: "available",
       usedPercent: 20,
-      basis: "tokens"
+      limitName: "Overall Codex",
+      windowLabel: "Weekly",
+      basis: "apiEquivalentCost"
     });
     expect(
       history.data.find((job) => job.id.endsWith("41"))
         ?.estimatedUsagePercentSinceReset
-    ).toBeCloseTo(5, 8);
+    ).toBeCloseTo(5.8333333333, 8);
     expect(
       history.data.find((job) => job.id.endsWith("42"))
         ?.estimatedUsagePercentSinceReset
-    ).toBeCloseTo(15, 8);
+    ).toBeCloseTo(14.1666666667, 8);
   });
 });
 
@@ -530,6 +565,7 @@ function writeSessionFile(
     totalTokens?: number;
     taskId?: string;
     parentThreadId?: string;
+    model?: string;
   } = {}
 ) {
   const durationMs = options.durationMs ?? 1000;
@@ -549,6 +585,11 @@ function writeSessionFile(
           cwd: "C:/repo",
           source: sourceKind
         }
+      },
+      {
+        timestamp,
+        type: "turn_context",
+        payload: { model: options.model ?? "gpt-5.6-sol" }
       },
       {
         timestamp,

@@ -97,7 +97,7 @@ export function TurnInspector({
           {activeShutdown.scheduled ? (
             <div className="inspector-section">
               <span className="panel-meta">Shutdown timer</span>
-              <strong>{activeShutdown.executeAt ? new Date(activeShutdown.executeAt).toLocaleTimeString() : "scheduled"}</strong>
+              <strong>{activeShutdown.executeAt ? new Date(activeShutdown.executeAt).toLocaleTimeString("en") : "scheduled"}</strong>
               <span>{activeShutdown.command}</span>
             </div>
           ) : null}

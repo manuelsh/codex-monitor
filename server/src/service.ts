@@ -201,8 +201,11 @@ export class MonitorService extends EventEmitter<{ change: [MonitorSnapshot] }> 
     usedPercent: number;
     startedAtMs: number;
     resetsAt: string;
+    limitName: string;
+    windowLabel: string;
   } | null {
-    const window = this.codexUsage.primaryLimit?.primary;
+    const limit = this.codexUsage.primaryLimit;
+    const window = limit?.primary;
     if (
       window?.usedPercent === null ||
       window?.usedPercent === undefined ||
@@ -220,7 +223,9 @@ export class MonitorService extends EventEmitter<{ change: [MonitorSnapshot] }> 
     return {
       usedPercent: window.usedPercent,
       startedAtMs: resetsAtMs - window.windowDurationMins * 60_000,
-      resetsAt: window.resetsAt
+      resetsAt: window.resetsAt,
+      limitName: limit?.name ?? "Overall Codex",
+      windowLabel: window.label
     };
   }
 

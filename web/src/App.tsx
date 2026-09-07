@@ -2,16 +2,15 @@ import { useEffect, useMemo, useState } from "react";
 import { BrowserRouter, Link, Route, Routes, useParams } from "react-router-dom";
 import type {
   CodexUsageSnapshot,
-  CodexUsageWindow,
   MonitorSnapshot,
-  ThreadNode,
-  TurnSummary
+  ThreadNode
 } from "../../shared/monitor";
 import { api } from "./api";
 import { HistoryPanel } from "./components/HistoryPanel";
 import { ThreadTree } from "./components/ThreadTree";
 import { TranscriptPanel } from "./components/TranscriptPanel";
 import { TurnInspector } from "./components/TurnInspector";
+import { overallUsageWindow, quotaPace } from "./presentation";
 import { useMonitorState } from "./useMonitorState";
 
 const EMPTY_SNAPSHOT: MonitorSnapshot = {
@@ -70,20 +69,7 @@ export default function App() {
     <BrowserRouter>
       <div className="app-shell">
         <header className="topbar">
-          <div>
-            <p className="eyebrow">Local supervision layer</p>
-            <h1>Codex Monitor</h1>
-          </div>
-          <div className="status-strip">
-            <StatusPill
-              tone={safeSnapshot.server.initialized ? "good" : "warn"}
-              label={`Socket ${connectionLabel}`}
-            />
-            <StatusPill
-              tone={isShutdownScheduled(safeSnapshot) ? "alert" : "neutral"}
-              label={shutdownStatusLabel(safeSnapshot, nowMs)}
-            />
-          </div>
+          <h1>Codex Monitor</h1>
         </header>
 
         {error ? <div className="banner banner-error">{error}</div> : null}
@@ -94,7 +80,7 @@ export default function App() {
         <Routes>
           <Route
             path="/"
-            element={<DashboardPage snapshot={safeSnapshot} nowMs={nowMs} />}
+            element={<DashboardPage snapshot={safeSnapshot} nowMs={nowMs} connectionLabel={connectionLabel} />}
           />
           <Route
             path="/runs/:runId"
@@ -108,82 +94,26 @@ export default function App() {
 
 function DashboardPage({
   snapshot,
+  connectionLabel,
   nowMs
 }: {
   snapshot: MonitorSnapshot;
   nowMs: number;
+  connectionLabel: string;
 }) {
   return (
     <main className="dashboard-page">
-      <section className="dashboard-overview">
-        <CodexUsageCard usage={snapshot.codexUsage} nowMs={nowMs} />
-        <AutomationCard snapshot={snapshot} nowMs={nowMs} />
-      </section>
-
-      <section className="surface sessions-panel">
-        <div className="panel-header">
-          <div>
-            <p className="eyebrow">Now</p>
-            <h3>Active Codex sessions</h3>
-          </div>
-          <span className="panel-meta">{snapshot.activeSessions.length} running now</span>
-        </div>
-
-        <div className="run-list">
-          {snapshot.activeSessions.length === 0 ? (
-            <div className="empty-state">
-              <p>No active Codex sessions right now.</p>
-              <span>
-                Only work that is still in progress appears here. Finished sessions
-                are hidden automatically.
-              </span>
-            </div>
-          ) : (
-            snapshot.activeSessions.map((session) => {
-              const linkedRun =
-                snapshot.runs.find((run) => run.rootThreadId === session.id) ?? null;
-              const cardContent = (
-                <>
-                  <div className="run-card-status" aria-hidden="true">
-                    <span />
-                  </div>
-                  <div className="run-card-main">
-                    <div className="run-card-title-row">
-                      <strong>{session.name ?? "Untitled session"}</strong>
-                      <span className="run-state">
-                        {linkedRun ? "tracked" : "external"}
-                      </span>
-                    </div>
-                    <p className="run-prompt">
-                      {session.preview ?? "No preview available yet."}
-                    </p>
-                    <div className="run-card-footer">
-                      <span title={session.cwd ?? undefined}>
-                        {session.cwd ?? "unknown cwd"}
-                      </span>
-                      <time dateTime={session.updatedAt}>
-                        {formatTime(session.updatedAt)}
-                      </time>
-                    </div>
-                  </div>
-                </>
-              );
-
-              return linkedRun ? (
-                <Link key={session.id} to={`/runs/${linkedRun.id}`} className="run-card">
-                  {cardContent}
-                </Link>
-              ) : (
-                <article key={session.id} className="run-card">
-                  {cardContent}
-                </article>
-              );
-            })
-          )}
-        </div>
-      </section>
-
-      <HistoryPanel />
+      <CodexUsageCard usage={snapshot.codexUsage} nowMs={nowMs} />
+      <HistoryPanel snapshot={snapshot} nowMs={nowMs} />
+      <footer className="monitor-footer">
+        <details className="secondary-controls">
+          <summary>Auto shutdown · {snapshot.globalAutomation.policy.enabled ? snapshot.activeShutdown.dryRun ? "Dry-run" : "On" : "Off"}{getShutdownCountdown(snapshot, nowMs) ? ` · ${shutdownStatusLabel(snapshot, nowMs)}` : ""}</summary>
+          <AutomationCard snapshot={snapshot} nowMs={nowMs} />
+        </details>
+        <span title={snapshot.server.initialized ? "Codex app-server initialized" : "Waiting for Codex app-server"}>
+          {connectionLabel === "live" && snapshot.server.initialized ? "Connected" : `Connection: ${connectionLabel}`} · API-equivalent cost, not a plan charge · Codex Spark excluded
+        </span>
+      </footer>
     </main>
   );
 }
@@ -263,82 +193,35 @@ function CodexUsageCard({
   usage: CodexUsageSnapshot;
   nowMs: number;
 }) {
-  const limit = usage.primaryLimit;
-  const windows = [limit?.primary, limit?.secondary].filter(
-    (window): window is CodexUsageWindow => Boolean(window)
-  );
-
+  const window = overallUsageWindow(usage);
+  const pace = window ? quotaPace(window, nowMs) : null;
+  const unavailable = usage.status !== "available" || !window;
+  const expired = pace?.expired;
+  const used = unavailable || expired ? null : window.usedPercent;
+  const remaining = unavailable || expired ? null : window.remainingPercent;
+  const difference = unavailable ? null : pace?.difference ?? null;
+  const elapsed = unavailable ? null : pace?.elapsed ?? null;
+  const heading = difference === null ? "Pace unavailable" : difference > 1 ? "Usage is ahead of elapsed time" : difference < -1 ? "Usage is below the proportional pace" : "Usage is in line with elapsed time";
   return (
-    <section className="surface usage-card">
-      <div className="usage-heading">
-        <div>
-          <span className="panel-meta">Codex remaining</span>
-          <strong>{limit?.name ?? "Overall Codex"}</strong>
+    <section className="surface global-quota" aria-label="Overall Codex usage">
+      <div className="global-quota-heading">Overall Codex usage{window ? ` · ${window.label.toLowerCase()}` : ""}</div>
+      {unavailable ? <p className="usage-message">{usage.status === "loading" ? "Loading overall Codex usage…" : usage.error ?? "Overall Codex quota is unavailable."}</p> : (
+        <div className="global-quota-body">
+          <div>
+            <div className="quota-number">{formatPercent(remaining)} <span>remaining</span></div>
+            <div className="quota-reset">{expired ? "Waiting for the renewed quota" : formatResetLabel(window.resetsAt, nowMs)}</div>
+          </div>
+          <div className="quota-pace">
+            <h2>{heading}</h2>
+            <div className="quota-compare"><span>Quota used</span><div className="usage-meter" role="img" aria-label={`${formatPercent(used)} quota used`}><span style={{ width: `${clampMeterPercent(used)}%` }} /></div><b>{formatPercent(used)}</b></div>
+            <div className="quota-compare"><span>Time elapsed</span><div className="usage-meter elapsed" role="img" aria-label={`${formatPercent(elapsed)} of period elapsed`}><span style={{ width: `${clampMeterPercent(elapsed)}%` }} /></div><b>{formatPercent(elapsed)}</b></div>
+            <p className={`pace-note ${difference !== null && difference > 1 ? "fast" : ""}`}>
+              {expired ? "Codex has not reported the new period yet." : difference === null ? "The period or usage data is incomplete." : Math.abs(difference) <= 1 ? "Consumption follows the proportional pace of the period." : `${Math.round(Math.abs(difference))} percentage points ${difference > 0 ? "above" : "below"} the proportional pace.`}
+            </p>
+          </div>
         </div>
-        <StatusPill
-          tone={toneFromUsage(usage)}
-          label={usageStatusLabel(usage)}
-          title={usageStatusTitle(usage)}
-        />
-      </div>
-
-      {usage.status === "available" && limit ? (
-        <div className="usage-windows">
-          {windows.map((window) => (
-            <UsageWindowCard
-              key={`${window.label}-${window.resetsAt ?? "unknown"}`}
-              nowMs={nowMs}
-              window={window}
-            />
-          ))}
-        </div>
-      ) : (
-        <p className="usage-message">{usageMessage(usage)}</p>
       )}
     </section>
-  );
-}
-
-function UsageWindowCard({
-  window,
-  nowMs
-}: {
-  window: CodexUsageWindow;
-  nowMs: number;
-}) {
-  const elapsedPercent = getWindowElapsedPercent(window, nowMs);
-  const elapsedLabel =
-    elapsedPercent === null ? "elapsed unknown" : `${formatPercent(elapsedPercent)} elapsed`;
-
-  return (
-    <div className="usage-window">
-      <div className="usage-window-top">
-        <span>{window.label}</span>
-        <strong>{formatPercent(window.usedPercent)} used</strong>
-      </div>
-      <div
-        className="usage-meter"
-        aria-label={`${formatPercent(window.usedPercent)} used, ${
-          elapsedPercent === null ? "elapsed unknown" : elapsedLabel
-        }`}
-      >
-        <span
-          className="usage-meter-fill"
-          style={{ width: `${clampMeterPercent(window.usedPercent)}%` }}
-        />
-        {elapsedPercent === null ? null : (
-          <span
-            className="usage-meter-marker"
-            style={{ left: `${elapsedPercent}%` }}
-            title={elapsedLabel}
-          />
-        )}
-      </div>
-      <div className="usage-window-bottom">
-        <span>{formatResetLabel(window.resetsAt, nowMs)}</span>
-        <span>{elapsedLabel}</span>
-      </div>
-    </div>
   );
 }
 
@@ -526,99 +409,12 @@ function toneFromRun(status: string): "good" | "warn" | "alert" | "neutral" {
   }
 }
 
-function toneFromUsage(
-  usage: CodexUsageSnapshot
-): "good" | "warn" | "alert" | "neutral" {
-  if (usage.status === "error") {
-    return "alert";
-  }
-
-  if (usage.status !== "available" || !usage.primaryLimit) {
-    return "neutral";
-  }
-
-  if (usage.primaryLimit.rateLimitReachedType) {
-    return "alert";
-  }
-
-  const remaining = Math.min(
-    ...[usage.primaryLimit.primary, usage.primaryLimit.secondary]
-      .map((window) => window?.remainingPercent)
-      .filter((value): value is number => value !== null && value !== undefined)
-  );
-
-  if (!Number.isFinite(remaining)) {
-    return "neutral";
-  }
-
-  if (remaining <= 10) {
-    return "alert";
-  }
-
-  if (remaining <= 25) {
-    return "warn";
-  }
-
-  return "good";
-}
-
-function usageStatusLabel(usage: CodexUsageSnapshot): string {
-  if (usage.status === "available") {
-    return usage.primaryLimit?.planType ?? "available";
-  }
-
-  if (usage.status === "loading") {
-    return "loading";
-  }
-
-  return usage.status;
-}
-
-function usageStatusTitle(usage: CodexUsageSnapshot): string | undefined {
-  if (usage.status === "available" && usage.primaryLimit?.planType) {
-    return `Codex plan: ${usage.primaryLimit.planType}`;
-  }
-
-  return undefined;
-}
-
-function usageMessage(usage: CodexUsageSnapshot): string {
-  if (usage.status === "loading") {
-    return "Loading Codex usage.";
-  }
-
-  return usage.error ?? "Codex usage is unavailable.";
-}
-
 function formatPercent(value: number | null): string {
   if (value === null || !Number.isFinite(value)) {
     return "--%";
   }
 
   return `${Math.round(value)}%`;
-}
-
-function getWindowElapsedPercent(
-  window: CodexUsageWindow,
-  nowMs: number
-): number | null {
-  if (
-    !window.resetsAt ||
-    window.windowDurationMins === null ||
-    !Number.isFinite(window.windowDurationMins) ||
-    window.windowDurationMins <= 0
-  ) {
-    return null;
-  }
-
-  const resetsAtMs = Date.parse(window.resetsAt);
-  if (!Number.isFinite(resetsAtMs)) {
-    return null;
-  }
-
-  const durationMs = window.windowDurationMins * 60000;
-  const startsAtMs = resetsAtMs - durationMs;
-  return clampMeterPercent(((nowMs - startsAtMs) / durationMs) * 100);
 }
 
 function clampMeterPercent(value: number | null): number {
@@ -630,11 +426,11 @@ function clampMeterPercent(value: number | null): number {
 }
 
 function formatResetLabel(isoValue: string | null, nowMs: number): string {
-  if (!isoValue) {
-    return "reset unknown";
+  if (!isoValue || !Number.isFinite(Date.parse(isoValue))) {
+    return "Reset time unavailable";
   }
 
-  return `resets in ${formatCompactDuration(Date.parse(isoValue) - nowMs)}`;
+  return `Resets in ${formatCompactDuration(Date.parse(isoValue) - nowMs)}`;
 }
 
 function formatCompactDuration(durationMs: number): string {
@@ -655,7 +451,7 @@ function formatCompactDuration(durationMs: number): string {
 }
 
 function formatTime(isoValue: string) {
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat("en", {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit"
@@ -673,7 +469,7 @@ function automationDescription(snapshot: MonitorSnapshot, nowMs: number): string
   }
 
   if (snapshot.activeShutdown.dryRun) {
-    return "Dry-run mode is on. Countdown will not shut down Windows.";
+    return "Dry-run mode is on. Countdown will not shut down this computer.";
   }
 
   if (snapshot.activeShutdown.executeAt || automation.state.shutdownAt) {
