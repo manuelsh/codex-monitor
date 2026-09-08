@@ -51,6 +51,12 @@ Codex's overall quota, while task shares are estimates. See
 [metric details](docs/setup-and-reference.md#metric-details) for the calculation
 and refresh periods.
 
+Activity follows session events and expires after 15 minutes without an update.
+Internal subagents are excluded from the task list; their attributable usage is
+included in the parent task. Titles also use the local desktop title index, then
+fall back to user requests with injected setup
+removed. Missing token records or unknown model prices remain unavailable.
+
 ## More information
 
 The monitor binds to loopback and reads your local Codex history. Task details

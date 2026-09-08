@@ -4,7 +4,6 @@ import path from "node:path";
 import {
   HISTORY_JOB_SORT_KEYS,
   SOURCE_KINDS,
-  previewText,
   type HistoryJob,
   type HistoryJobListResponse,
   type HistoryJobSortKey,
@@ -14,6 +13,7 @@ import {
   type TokenUsage
 } from "../../shared/monitor";
 import { asRecord, asString, cloneValue, toIsoDate } from "./utils";
+import { userPreview } from "../../shared/session-preview";
 
 type SessionFile = {
   path: string;
@@ -105,6 +105,7 @@ export class HistoryJobReader {
     usageWindow?: UsageWindow | null;
   }): HistoryJobListResponse {
     const nowMs = args.nowMs ?? Date.now();
+    const indexedNames = readSessionNames(path.join(this.sessionsRoot, "..", "session_index.jsonl"));
     const sessionFiles = listSessionFiles(this.sessionsRoot);
     const activePaths = new Set(sessionFiles.map((file) => file.path));
 
@@ -134,7 +135,7 @@ export class HistoryJobReader {
       args.usageWindow ?? null
     );
     const jobs = allJobs
-      .map((job) => applyMetadata(job, args.metadataById?.get(job.id)))
+      .map((job) => applyMetadata({ ...job, name: indexedNames.get(job.id) ?? job.name }, args.metadataById?.get(job.id)))
       .filter((job) => !sourceKindSet || sourceKindSet.has(job.sourceKind))
       .filter((job) => matchesSearch(job, searchTerm))
       .sort((left, right) =>
@@ -198,6 +199,22 @@ export class HistoryJobReader {
     });
     return cloneValue(job);
   }
+}
+
+// The desktop index also names tasks omitted by thread/list, such as archived tasks.
+function readSessionNames(indexPath: string): Map<string, string> {
+  const names = new Map<string, string>();
+  try {
+    for (const line of readFileSync(indexPath, "utf8").split(/\r?\n/)) {
+      try {
+        const entry = asRecord(JSON.parse(line));
+        const id = asString(entry?.id);
+        const name = asString(entry?.thread_name);
+        if (id && name?.trim()) names.set(id, name);
+      } catch { /* An appended final line may still be incomplete. */ }
+    }
+  } catch { /* The index is optional on older installations. */ }
+  return names;
 }
 
 function mergeJobsByTask(jobs: ParsedHistoryJob[]): ParsedHistoryJob[] {
@@ -445,10 +462,10 @@ function applyMetadata(
   return {
     ...job,
     name: metadata.name ?? job.name,
-    preview: metadata.preview ?? job.preview,
+    preview: userPreview(metadata.preview) ?? job.preview,
     sourceKind: metadata.sourceKind ?? job.sourceKind,
     createdAt: metadata.createdAt ?? job.createdAt,
-    updatedAt: metadata.updatedAt ?? job.updatedAt,
+    updatedAt: metadata.updatedAt ? latestIso(metadata.updatedAt, job.updatedAt) : job.updatedAt,
     cwd: metadata.cwd ?? job.cwd,
     modelProvider: metadata.modelProvider ?? job.modelProvider
   };
@@ -568,6 +585,7 @@ export function parseHistorySessionFile(args: {
     }
 
     const payloadType = asString(payload?.type);
+    if (payloadType === "user_message") preview = userPreview(asString(payload?.message)) ?? preview;
 
     if (payloadType === "task_started") {
       const turnId = asString(payload?.turn_id) ?? asString(payload?.turnId);
@@ -969,7 +987,7 @@ function extractUserPreview(payload: Record<string, unknown> | null): string | n
     .map((entry) => asString(entry.text))
     .filter((entry): entry is string => Boolean(entry));
 
-  return previewText(pieces.join("\n\n"), 240);
+  return userPreview(pieces.join("\n\n"));
 }
 
 function normalizeTokenUsage(value: unknown): TokenUsage | null {

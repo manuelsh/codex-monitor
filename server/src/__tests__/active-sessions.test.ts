@@ -1,4 +1,7 @@
-import { parseActiveSessionFile } from "../active-sessions";
+import { ActiveSessionTracker, parseActiveSessionFile } from "../active-sessions";
+import { mkdtempSync, writeFileSync, appendFileSync, statSync, utimesSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 describe("parseActiveSessionFile", () => {
   it("returns an active session when the latest turn started and has not finished", () => {
@@ -49,7 +52,7 @@ describe("parseActiveSessionFile", () => {
       preview: "monitor only the live work",
       cwd: "C:\\work\\codex-monitor",
       createdAt: null,
-      updatedAt: "2026-04-10T11:54:20.000Z",
+      updatedAt: "2026-04-10T11:53:18.580Z",
       lastTurnStartedAt: "2026-04-10T11:53:18.572Z"
     });
   });
@@ -102,5 +105,29 @@ describe("parseActiveSessionFile", () => {
     });
 
     expect(session).toBeNull();
+  });
+});
+
+describe("ActiveSessionTracker cache", () => {
+  it("expires unchanged sessions and detects completion even when mtime does not change", () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "monitor-active-"));
+    try {
+      const file = path.join(root, "rollout-019d773d-49eb-7ae0-9327-ff3b0b39c7a7.jsonl");
+      const now = Date.now();
+      writeFileSync(file, JSON.stringify({ timestamp: new Date(now).toISOString(), type: "event_msg", payload: { type: "task_started", turn_id: "t" } }) + "\n");
+      const tracker = new ActiveSessionTracker(root, 1000);
+      expect(tracker.listActiveSessions(now)).toHaveLength(1);
+      expect(tracker.listActiveSessions(now + 1001)).toHaveLength(0);
+      const stat = statSync(file);
+      appendFileSync(file, JSON.stringify({ timestamp: new Date(now + 500).toISOString(), type: "event_msg", payload: { type: "task_complete", turn_id: "t" } }) + "\n");
+      utimesSync(file, stat.atime, stat.mtime);
+      expect(tracker.listActiveSessions(now + 500)).toHaveLength(0);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("excludes internal subagents from top-level activity", () => {
+    expect(parseActiveSessionFile({ sessionId: "review", updatedAt: new Date().toISOString(), nowMs: Date.now(), activeWindowMs: 900000,
+      fileContent: [JSON.stringify({ type: "session_meta", payload: { source: { subagent: { other: "guardian" } } } }), JSON.stringify({ type: "event_msg", payload: { type: "task_started", turn_id: "t" } })].join("\n")
+    })).toBeNull();
   });
 });

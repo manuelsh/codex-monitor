@@ -1,13 +1,15 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { previewText, type ActiveSession } from "../../shared/monitor";
+import { type ActiveSession } from "../../shared/monitor";
 import { asRecord, asString } from "./utils";
+import { userPreview } from "../../shared/session-preview";
 
 const DEFAULT_ACTIVE_WINDOW_MS = 15 * 60 * 1000;
 
 type CachedSessionState = {
   mtimeMs: number;
+  size: number;
   session: ActiveSession | null;
 };
 
@@ -30,7 +32,7 @@ export class ActiveSessionTracker {
     }
 
     return sessionFiles
-      .map((file) => this.readActiveSession(file.path, file.mtimeMs, nowMs))
+      .map((file) => this.readActiveSession(file.path, file.mtimeMs, file.size, nowMs))
       .filter((session): session is ActiveSession => Boolean(session))
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
@@ -38,16 +40,18 @@ export class ActiveSessionTracker {
   private readActiveSession(
     filePath: string,
     mtimeMs: number,
+    size: number,
     nowMs: number
   ): ActiveSession | null {
     const cached = this.cache.get(filePath);
-    if (cached && cached.mtimeMs === mtimeMs) {
-      return cached.session;
+    if (cached && cached.mtimeMs === mtimeMs && cached.size === size) {
+      return cached.session && nowMs - Date.parse(cached.session.updatedAt) <= this.activeWindowMs
+        ? cached.session : null;
     }
 
     const sessionId = extractSessionId(filePath);
     if (!sessionId) {
-      this.cache.set(filePath, { mtimeMs, session: null });
+      this.cache.set(filePath, { mtimeMs, size, session: null });
       return null;
     }
 
@@ -55,7 +59,7 @@ export class ActiveSessionTracker {
     try {
       fileContent = readFileSync(filePath, "utf8");
     } catch {
-      this.cache.set(filePath, { mtimeMs, session: null });
+      this.cache.set(filePath, { mtimeMs, size, session: null });
       return null;
     }
 
@@ -67,7 +71,7 @@ export class ActiveSessionTracker {
       activeWindowMs: this.activeWindowMs
     });
 
-    this.cache.set(filePath, { mtimeMs, session });
+    this.cache.set(filePath, { mtimeMs, size, session });
     return session;
   }
 }
@@ -85,6 +89,7 @@ export function parseActiveSessionFile(args: {
   let name: string | null = null;
   let cwd: string | null = null;
   let latestUserInput: string | null = null;
+  let latestTimestamp: string | null = null;
 
   for (const rawLine of args.fileContent.split(/\r?\n/)) {
     if (!rawLine.trim()) {
@@ -105,8 +110,13 @@ export function parseActiveSessionFile(args: {
 
     const recordType = asString(record.type);
     const payload = asRecord(record.payload);
+    const timestamp = asString(record.timestamp);
+    if (timestamp && Number.isFinite(Date.parse(timestamp)) &&
+        (!latestTimestamp || Date.parse(timestamp) > Date.parse(latestTimestamp))) latestTimestamp = timestamp;
 
     if (recordType === "session_meta") {
+      if (asRecord(payload?.source)?.subagent || asRecord(payload?.source)?.subAgent ||
+          asString(payload?.source)?.startsWith("subAgent")) return null;
       name = asString(payload?.name) ?? name;
       cwd = asString(payload?.cwd) ?? cwd;
       continue;
@@ -134,6 +144,7 @@ export function parseActiveSessionFile(args: {
     }
 
     const payloadType = asString(payload?.type);
+    if (payloadType === "user_message") latestUserInput = userPreview(asString(payload?.message)) ?? latestUserInput;
     const turnId = asString(payload?.turn_id) ?? asString(payload?.turnId);
     if (payloadType === "task_started" && turnId) {
       latestTurnId = turnId;
@@ -153,7 +164,8 @@ export function parseActiveSessionFile(args: {
     return null;
   }
 
-  const updatedAtMs = Date.parse(args.updatedAt);
+  const updatedAt = latestTimestamp ?? args.updatedAt;
+  const updatedAtMs = Date.parse(updatedAt);
   if (
     Number.isFinite(updatedAtMs) &&
     args.nowMs - updatedAtMs > args.activeWindowMs
@@ -167,7 +179,7 @@ export function parseActiveSessionFile(args: {
     preview: latestUserInput,
     cwd,
     createdAt: null,
-    updatedAt: args.updatedAt,
+    updatedAt,
     lastTurnStartedAt: latestTurnStartedAt
   };
 }
@@ -185,7 +197,7 @@ function extractUserPreview(payload: Record<string, unknown>): string | null {
     .map((entry) => asString(entry.text))
     .filter((entry): entry is string => Boolean(entry));
 
-  return previewText(pieces.join("\n\n"), 240);
+  return userPreview(pieces.join("\n\n"));
 }
 
 function resolveCodexSessionsRoot(): string {
@@ -194,19 +206,19 @@ function resolveCodexSessionsRoot(): string {
   return path.join(codexHome, "sessions");
 }
 
-function listSessionFiles(root: string): Array<{ path: string; mtimeMs: number }> {
+function listSessionFiles(root: string): Array<{ path: string; mtimeMs: number; size: number }> {
   if (!existsSync(root)) {
     return [];
   }
 
-  const results: Array<{ path: string; mtimeMs: number }> = [];
+  const results: Array<{ path: string; mtimeMs: number; size: number }> = [];
   walkDirectory(root, results);
   return results.sort((left, right) => right.mtimeMs - left.mtimeMs);
 }
 
 function walkDirectory(
   directory: string,
-  results: Array<{ path: string; mtimeMs: number }>
+  results: Array<{ path: string; mtimeMs: number; size: number }>
 ): void {
   let entries;
   try {
@@ -227,9 +239,11 @@ function walkDirectory(
     }
 
     try {
+      const stat = statSync(fullPath);
       results.push({
         path: fullPath,
-        mtimeMs: statSync(fullPath).mtimeMs
+        mtimeMs: stat.mtimeMs,
+        size: stat.size
       });
     } catch {
       continue;

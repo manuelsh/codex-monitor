@@ -5,6 +5,18 @@ import path from "node:path";
 import { HistoryJobReader, parseHistorySessionFile } from "../history-jobs";
 import { MonitorService } from "../service";
 
+it("recovers desktop titles absent from thread/list and tolerates a partial index line", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "monitor-index-"));
+  try {
+    const sessions = path.join(root, "sessions");
+    mkdirSync(sessions);
+    const id = "019e1b12-3784-79c3-86e7-5469e67f114b";
+    writeFileSync(path.join(sessions, `rollout-${id}.jsonl`), JSON.stringify({ type: "session_meta", payload: { id } }));
+    writeFileSync(path.join(root, "session_index.jsonl"), [JSON.stringify({ id, thread_name: "Old title" }), JSON.stringify({ id, thread_name: "Actual desktop title" }), '{"id":'].join("\n"));
+    expect(new HistoryJobReader(sessions).listJobs({}).data[0].name).toBe("Actual desktop title");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 class FakeCodexClient extends EventEmitter {
   public constructor(private readonly threads: unknown[] | null = null) {
     super();

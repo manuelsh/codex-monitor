@@ -420,7 +420,7 @@ export class MonitorService extends EventEmitter<{ change: [MonitorSnapshot] }> 
             preview: asString(metadata.preview) ?? session.preview,
             cwd: asString(metadata.cwd) ?? session.cwd,
             createdAt: toIsoDate(metadata.createdAt) ?? session.createdAt,
-            updatedAt: toIsoDate(metadata.updatedAt) ?? session.updatedAt
+            updatedAt: session.updatedAt
           };
         });
       }
